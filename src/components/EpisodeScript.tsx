@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { RadioShowEpisode, ScriptLine } from '../types';
-import { Play, Volume2, Music, PhoneCall, Disc, AlertCircle, Sparkles, Copy, Check, Download, Layers, Pencil, Trash, Plus, X } from 'lucide-react';
+import { Play, Volume2, Music, PhoneCall, Disc, AlertCircle, Sparkles, Copy, Check, Download, Layers, Pencil, Trash, Plus, X, ChevronLeft, ChevronRight, Pause, Radio, RefreshCcw } from 'lucide-react';
 import VoicePresetsAndCompiler, { SpeakerRegistry } from './VoicePresetsAndCompiler';
 
 interface EpisodeScriptProps {
@@ -27,6 +27,18 @@ export default function EpisodeScript({ episode }: EpisodeScriptProps) {
   const [editSpeaker, setEditSpeaker] = useState('');
   const [editCues, setEditCues] = useState('');
   const [editText, setEditText] = useState('');
+
+  // Continuous Autoplay Player Engine states
+  const [autoplayActive, setAutoplayActive] = useState(false);
+  const [autoplayIndex, setAutoplayIndex] = useState<number | null>(null);
+  const [autoScrollFollow, setAutoScrollFollow] = useState(true);
+
+  // AI rephrase assistant states
+  const [rephrasingLineId, setRephrasingLineId] = useState<string | null>(null);
+  const [activeRephraseDropdownId, setActiveRephraseDropdownId] = useState<string | null>(null);
+
+  // Dialogue clip downloader states
+  const [downloadingLineId, setDownloadingLineId] = useState<string | null>(null);
 
   // Speaker custom presets registry synchronized via localStorage
   const [speakerRegistry, setSpeakerRegistry] = useState<SpeakerRegistry>(() => {
@@ -111,16 +123,17 @@ export default function EpisodeScript({ episode }: EpisodeScriptProps) {
     URL.revokeObjectURL(url);
   };
 
-  // Trigger TTS dynamically for a script line
-  const handlePlayLine = async (line: ScriptLine) => {
+  // Trigger TTS dynamically for a script line (accepts an optional onEndedCallback for continuous flow)
+  const handlePlayLine = async (line: ScriptLine, callbackOnEnd?: () => void) => {
     // If already playing another line, pause it
     if (playingAudio) {
       playingAudio.pause();
       setPlayingAudio(null);
     }
 
-    if (playingLineId === line.id) {
+    if (playingLineId === line.id && !callbackOnEnd) {
       setPlayingLineId(null);
+      setAutoplayActive(false);
       return;
     }
 
@@ -171,6 +184,7 @@ export default function EpisodeScript({ episode }: EpisodeScriptProps) {
         } else {
           alert('Could not produce audio. Ensure process.env.GEMINI_API_KEY is configured correctly.');
           setPlayingLineId(null);
+          setAutoplayActive(false);
           return;
         }
       }
@@ -182,6 +196,9 @@ export default function EpisodeScript({ episode }: EpisodeScriptProps) {
       const cleanupAndStop = () => {
         setPlayingLineId(null);
         setPlayingAudio(null);
+        if (callbackOnEnd) {
+          callbackOnEnd();
+        }
       };
 
       audio.onended = cleanupAndStop;
@@ -195,6 +212,213 @@ export default function EpisodeScript({ episode }: EpisodeScriptProps) {
       console.error('Error generating script voice speak:', err);
       alert('Error connecting to voice generator.');
       setPlayingLineId(null);
+      setAutoplayActive(false);
+    }
+  };
+
+  // Continuous Playback Engine Sequencers
+  const toggleAutoplay = () => {
+    if (autoplayActive) {
+      setAutoplayActive(false);
+    } else {
+      // If we are currently at idle, start from the first line or current indices
+      if (autoplayIndex === null || autoplayIndex >= localScript.length) {
+        setAutoplayIndex(0);
+      }
+      setAutoplayActive(true);
+    }
+  };
+
+  const handleAutoplayReset = () => {
+    setAutoplayActive(false);
+    setAutoplayIndex(null);
+    if (playingAudio) {
+      playingAudio.pause();
+      setPlayingAudio(null);
+    }
+    setPlayingLineId(null);
+  };
+
+  const handleAutoplayNext = () => {
+    if (autoplayIndex !== null && autoplayIndex + 1 < localScript.length) {
+      if (playingAudio) {
+        playingAudio.pause();
+        setPlayingAudio(null);
+      }
+      setAutoplayIndex(autoplayIndex + 1);
+    }
+  };
+
+  const handleAutoplayPrev = () => {
+    if (autoplayIndex !== null && autoplayIndex > 0) {
+      if (playingAudio) {
+        playingAudio.pause();
+        setPlayingAudio(null);
+      }
+      setAutoplayIndex(autoplayIndex - 1);
+    }
+  };
+
+  // Autoplay reactive runner loop
+  useEffect(() => {
+    if (autoplayActive && autoplayIndex !== null && autoplayIndex < localScript.length) {
+      const line = localScript[autoplayIndex];
+
+      // Automatically smooth-scroll dialogue card into structural view
+      if (autoScrollFollow) {
+        const docEl = document.getElementById(`line-container-${line.id}`);
+        if (docEl) {
+          docEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }
+
+      handlePlayLine(line, () => {
+        setAutoplayIndex(prev => {
+          if (prev !== null && prev + 1 < localScript.length) {
+            return prev + 1;
+          } else {
+            // Reached conclusion of show
+            setAutoplayActive(false);
+            return null;
+          }
+        });
+      });
+    } else if (!autoplayActive) {
+      // Pause playing audio on manual interrupt pause
+      if (playingAudio) {
+        playingAudio.pause();
+        setPlayingAudio(null);
+      }
+      setPlayingLineId(null);
+    }
+  }, [autoplayActive, autoplayIndex]);
+
+  // Clean-up effect on component unmount
+  useEffect(() => {
+    return () => {
+      if (playingAudio) {
+        playingAudio.pause();
+      }
+    };
+  }, [playingAudio]);
+
+  // Download Dialogue segment as a high-quality WAV audio file
+  const handleDownloadLineClip = async (line: ScriptLine) => {
+    setDownloadingLineId(line.id);
+    try {
+      let audioSource = audioCache[line.id];
+
+      if (!audioSource) {
+        const config = speakerRegistry[line.speaker] || {
+          voiceName: 'Zephyr',
+          emotionStyle: 'standard'
+        };
+
+        const res = await fetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: line.text,
+            voiceName: config.voiceName,
+            emotionStyle: config.emotionStyle
+          })
+        });
+
+        const data = await res.json();
+        if (data.audio) {
+          const binaryString = window.atob(data.audio);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+
+          const mime = data.mimeType || 'audio/wav';
+          const blob = new Blob([bytes], { type: mime });
+          audioSource = URL.createObjectURL(blob);
+
+          setAudioCache(prev => ({
+            ...prev,
+            [line.id]: audioSource
+          }));
+        } else {
+          alert('Could not compile clip audio from server.');
+          setDownloadingLineId(null);
+          return;
+        }
+      }
+
+      // Explicitly trigger anchor tag download
+      const dLink = document.createElement('a');
+      dLink.href = audioSource;
+      dLink.download = `EchoWave_Studio_Segment_${line.speaker.replace(/\s+/g, '_')}_${line.id}.wav`;
+      dLink.click();
+    } catch (err) {
+      console.error('Dialogue segment download err:', err);
+      alert('Error triggering audio clip compile download.');
+    } finally {
+      setDownloadingLineId(null);
+    }
+  };
+
+  // Call server-side /api/rephrase-line Gemini rephrase controller
+  const handleAIRephrase = async (line: ScriptLine, toneStyle: string) => {
+    setRephrasingLineId(line.id);
+    setActiveRephraseDropdownId(null);
+
+    // Stop active playings to prevent sound overlap/glitch
+    if (autoplayActive) {
+      setAutoplayActive(false);
+    }
+    if (playingAudio) {
+      playingAudio.pause();
+      setPlayingAudio(null);
+    }
+    setPlayingLineId(null);
+
+    try {
+      const res = await fetch('/api/rephrase-line', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: line.text,
+          speaker: line.speaker,
+          role: line.role || 'guest',
+          style: toneStyle
+        })
+      });
+
+      const data = await res.json();
+      if (data.text) {
+        // Rewrite dialogue script state
+        setLocalScript(prev => prev.map(l => {
+          if (l.id === line.id) {
+            return {
+              ...l,
+              text: data.text.trim()
+            };
+          }
+          return l;
+        }));
+
+        // Invalidate associated audioCache file so it has to rebuild to matches new text
+        setAudioCache(prev => {
+          const clone = { ...prev };
+          if (clone[line.id]) {
+            try {
+              URL.revokeObjectURL(clone[line.id]);
+            } catch {}
+            delete clone[line.id];
+          }
+          return clone;
+        });
+      } else {
+        alert('Server API was unable to polish text. Check if process.env.GEMINI_API_KEY is declared.');
+      }
+    } catch (err) {
+      console.error('Dialogue rephrase API error:', err);
+      alert('Network failure connecting to dialogue rephrase service.');
+    } finally {
+      setRephrasingLineId(null);
     }
   };
 
@@ -505,6 +729,108 @@ export default function EpisodeScript({ episode }: EpisodeScriptProps) {
         setAudioCache={setAudioCache}
       />
 
+      {/* CONTINUOUS BROADCAST PLAYER CONSOLE */}
+      <div className="bg-black/35 border border-white/5 rounded-2xl p-4 flex flex-col md:flex-row items-center justify-between gap-4 shadow-2xl">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-[#ff9500]/10 flex items-center justify-center border border-[#ff9500]/20 text-[#ff9500]">
+            <Radio className={`w-5 h-5 ${autoplayActive ? 'animate-bounce text-[#ff9500]' : 'text-slate-400'}`} />
+          </div>
+          <div className="text-left">
+            <h3 className="text-xs font-extrabold uppercase tracking-widest text-[#ff9500] flex items-center gap-1.5">
+              <span>Virtual Script Autoplayer</span>
+              <span className="text-[8px] font-extrabold text-white bg-red-500 px-1.5 py-0.5 rounded animate-pulse">
+                LIVE preview
+              </span>
+            </h3>
+            <p className="text-[10px] text-[#8e8e93]">Continuous sequential vocal reading with automated scrolling focus.</p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2.5">
+          {/* Previous Button */}
+          <button
+            onClick={handleAutoplayPrev}
+            disabled={autoplayIndex === null || autoplayIndex === 0}
+            className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed transition cursor-pointer select-none"
+            title="Previous line"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+
+          {/* Master Play/Pause Sequential Button */}
+          <button
+            onClick={toggleAutoplay}
+            className={`py-2 px-4 rounded-xl flex items-center gap-2 text-xs font-extrabold uppercase tracking-wider cursor-pointer border select-none transition-all duration-150 ${
+              autoplayActive
+                ? 'bg-red-500 hover:bg-red-600 text-white border-red-500/10'
+                : 'bg-[#ff9500] hover:bg-[#ff9500]/90 text-slate-950 border-orange-400/10 shadow-md'
+            }`}
+          >
+            {autoplayActive ? (
+              <>
+                <Pause className="w-4 h-4 fill-white" strokeWidth={3} />
+                Pause Show
+              </>
+            ) : (
+              <>
+                <Play className="w-4 h-4 fill-slate-950 text-slate-950" strokeWidth={3} />
+                Play Entire Show
+              </>
+            )}
+          </button>
+
+          {/* Next Button */}
+          <button
+            onClick={handleAutoplayNext}
+            disabled={autoplayIndex === null || autoplayIndex >= localScript.length - 1}
+            className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed transition cursor-pointer select-none"
+            title="Next line"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
+
+          {/* Reset Show */}
+          <button
+            onClick={handleAutoplayReset}
+            className="py-2 px-3 rounded-xl bg-white/5 border border-white/5 hover:bg-white/10 text-[10px] font-extrabold uppercase tracking-widest text-[#8e8e93] hover:text-white transition cursor-pointer select-none"
+            title="Reset to segment #1"
+          >
+            Reset
+          </button>
+        </div>
+
+        {/* Scrolling Focus toggle & status */}
+        <div className="flex flex-col sm:flex-row items-center gap-4 text-xs font-sans text-slate-400">
+          <label className="flex items-center gap-2 cursor-pointer select-none md:border-r md:border-white/15 md:pr-4">
+            <input
+              type="checkbox"
+              checked={autoScrollFollow}
+              onChange={(e) => setAutoScrollFollow(e.target.checked)}
+              className="w-4 h-4 rounded text-[#ff9500] bg-[#16181d] border-white/10 accent-[#ff9500] cursor-pointer"
+            />
+            <span className="text-[9.5px] uppercase font-bold text-slate-300 hover:text-white transition">Auto-Scroll Focus</span>
+          </label>
+
+          {/* Dynamic LED Index Tracker */}
+          <div className="flex items-center gap-2 font-mono text-[9px] text-[#ff9500] bg-black/45 border border-white/5 px-3 py-2 rounded-xl h-8">
+            <span className={`w-1.5 h-1.5 rounded-full ${autoplayActive ? 'bg-red-500 animate-pulse' : 'bg-slate-600'}`} />
+            <span>
+              {autoplayActive && autoplayIndex !== null ? (
+                <>
+                  Line <span className="text-white font-black font-mono">#{autoplayIndex + 1}</span> of {localScript.length} ({localScript[autoplayIndex]?.speaker})
+                </>
+              ) : autoplayIndex !== null ? (
+                <>
+                  PAUSED AT <span className="text-white font-mono">#{autoplayIndex + 1}</span>
+                </>
+              ) : (
+                'CHANNELS IDLE'
+              )}
+            </span>
+          </div>
+        </div>
+      </div>
+
       {/* SEARCH AND FILTERS */}
       <div className="flex flex-col sm:flex-row gap-3 pt-1">
         <input
@@ -569,8 +895,9 @@ export default function EpisodeScript({ episode }: EpisodeScriptProps) {
             return (
               <div
                 key={line.id}
+                id={`line-container-${line.id}`}
                 className={`flex gap-4 p-4 rounded-xl border transition-all duration-200 relative ${outerStyle} ${
-                  isPlaying ? 'ring-2 ring-[#ff9500] border-transparent bg-[#0a0b0e]' : ''
+                  isPlaying || (autoplayActive && autoplayIndex === idx) ? 'ring-2 ring-[#ff9500] border-transparent bg-[#0a0b0e]' : ''
                 }`}
               >
                 {/* Speaker Avatar / TTS Button */}
@@ -679,7 +1006,7 @@ export default function EpisodeScript({ episode }: EpisodeScriptProps) {
                     </p>
 
                     {/* Action button toolstrip for Play, Edit, Delete */}
-                    <div className="flex items-center gap-3 pt-2 mt-2 border-t border-white/5 font-sans">
+                    <div className="flex items-center gap-3.5 pt-2 mt-2 border-t border-white/5 font-sans flex-wrap sm:flex-nowrap">
                       <button
                         onClick={() => handleStartEdit(line)}
                         className="inline-flex items-center gap-1 text-[10px] font-bold uppercase text-slate-400 hover:text-[#ff9500] transition cursor-pointer select-none"
@@ -688,6 +1015,70 @@ export default function EpisodeScript({ episode }: EpisodeScriptProps) {
                         <Pencil className="w-3 h-3 text-slate-500 hover:text-[#ff9500]" />
                         Edit dialogue
                       </button>
+
+                      {/* AI Dialogue dynamic rephrase button with Popover styles */}
+                      <div className="relative">
+                        <button
+                          onClick={() => {
+                            setActiveRephraseDropdownId(activeRephraseDropdownId === line.id ? null : line.id);
+                          }}
+                          disabled={rephrasingLineId === line.id}
+                          className={`inline-flex items-center gap-1 text-[10px] font-bold uppercase transition select-none cursor-pointer ${
+                            rephrasingLineId === line.id
+                              ? 'text-yellow-400 animate-pulse'
+                              : 'text-slate-400 hover:text-yellow-400'
+                          }`}
+                          title="Tonal Dialogue refiner"
+                        >
+                          <Sparkles className={`w-3 h-3 ${rephrasingLineId === line.id ? 'animate-spin text-yellow-400' : 'text-slate-500'}`} />
+                          {rephrasingLineId === line.id ? 'Polishing...' : 'AI Rephrase'}
+                        </button>
+
+                        {/* Floating visual dropdown popup */}
+                        {activeRephraseDropdownId === line.id && (
+                          <div className="absolute left-0 bottom-full mb-2 bg-[#12131a] border border-white/10 rounded-xl p-2 w-48 shadow-2xl z-50 animate-fade-in space-y-1">
+                            <div className="text-[8px] uppercase tracking-wider text-slate-500 px-2 py-1 font-extrabold border-b border-white/5 mb-1.5">
+                              Dynamic Dialogue Styles
+                            </div>
+                            {[
+                              { label: '🪄 Wittier Comeback', style: 'wittier' },
+                              { label: '🙄 Sarcastic Mockery', style: 'sarcastic' },
+                              { label: '🎭 Add Dramatic Pause', style: 'pause' },
+                              { label: '🩺 Rigorous Professional', style: 'professional' },
+                              { label: '🕵️ Conspiracy Theory', style: 'conspiracy' },
+                              { label: '✂️ Snap Shorter Soundbite', style: 'shorter' }
+                            ].map(item => (
+                              <button
+                                key={item.style}
+                                onClick={() => handleAIRephrase(line, item.style)}
+                                className="w-full text-left text-[10.5px] font-semibold text-slate-300 hover:text-[#ff9500] hover:bg-white/5 py-1 px-2 rounded-lg transition cursor-pointer"
+                              >
+                                {item.label}
+                              </button>
+                            ))}
+                            <div className="border-t border-white/5 pt-1.5 mt-1">
+                              <button
+                                onClick={() => setActiveRephraseDropdownId(null)}
+                                className="w-full text-center text-[8px] uppercase tracking-widest text-[#8e8e93] hover:text-white py-0.5 rounded cursor-pointer"
+                              >
+                                Close menu
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Clip compile WAV downloader */}
+                      <button
+                        onClick={() => handleDownloadLineClip(line)}
+                        disabled={downloadingLineId === line.id}
+                        className="inline-flex items-center gap-1 text-[10px] font-bold uppercase text-slate-400 hover:text-emerald-400 transition cursor-pointer select-none disabled:opacity-50"
+                        title="Compile and download individual vocal WAV segment"
+                      >
+                        <Download className={`w-3 h-3 ${downloadingLineId === line.id ? 'animate-bounce text-emerald-400' : 'text-slate-500'}`} />
+                        {downloadingLineId === line.id ? 'Rendering...' : 'Download WAV'}
+                      </button>
+
                       <button
                         onClick={() => handleDeleteLine(line.id)}
                         className="inline-flex items-center gap-1 text-[10px] font-bold uppercase text-slate-400 hover:text-red-400 transition cursor-pointer ml-auto select-none"

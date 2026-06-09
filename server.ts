@@ -183,6 +183,59 @@ app.post('/api/extract-text', async (req, res) => {
   }
 });
 
+// 2b. Rephrase Specific Script Dialogue line with precision AI style controls
+app.post('/api/rephrase-line', async (req, res) => {
+  try {
+    const { text, speaker, role, style } = req.body;
+    if (!text || !speaker) {
+      return res.status(400).json({ error: 'Missing dialogue text or speaker' });
+    }
+
+    const styleDescriptions: Record<string, string> = {
+      wittier: 'sharp, lightweight dialogue, incorporating a clever, quick-witted pun or humorous radio-style comeback.',
+      sarcastic: 'deadpan, highly cynical style. Sarcastically point out the absurdity or mock the previous premise.',
+      pause: 'incorporate dramatic pacing. Insert a dramatic sound cue such as [TENSE PAUSE], [GASPS] or [SIGH] inside the dialogue to create narrative tension.',
+      shorter: 'extremely concise, snappy, high-impact radio headline or crisp soundbite. Keep it down to a few punchy words.',
+      professional: 'sincere and rigorous academic/professional style. Explains the concept with intellectual focus, statistics, or clear logic.',
+      conspiracy: 'funny, dramatic, over-the-top conspiracy theory angle. Act highly suspicious and dramatic, questioning standard explanations.'
+    };
+
+    const stylePrompt = styleDescriptions[style] || 'funny, engaging radio talk show style.';
+
+    const prompt = `
+      Original dialogue script line spoken by character "${speaker}" (role profile/personality: "${role}"):
+      "${text}"
+
+      Please rewrite and improve this line. Keep it in character for "${speaker}". 
+      Make the new line strictly adopt this style: ${stylePrompt}
+
+      CRITICAL RESTRICTION ON OUTPUT:
+      - Return ONLY and strictly the new dialogue text string. 
+      - Do NOT wrap it in quotes.
+      - Do NOT include any intro or outro phrases (like "Here is the rewritten line:").
+      - Only output pure character dialogue.
+      - Keep any appropriate bracketed sound cue formatting if needed (e.g. [LAUGHTER]).
+    `;
+
+    console.log(`[Gemini API] Rephrasing dialogue for ${speaker} (style: ${style}) using gemini-3.5-flash...`);
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.5-flash',
+      contents: prompt,
+      config: {
+        systemInstruction: "You are an elite, award-winning radio script editor and comedy speechwriter. You rewrite individual lines of dialogue to make them pop perfectly according to requested vocal styles.",
+        temperature: 1.0,
+      }
+    });
+
+    const newText = response.text?.trim().replace(/^"|"$/g, '') || text;
+    res.json({ text: newText });
+  } catch (error: any) {
+    console.error('[Gemini API] Line rephrasing failed:', error);
+    res.status(500).json({ error: error.message || 'Failed to rephrase script line' });
+  }
+});
+
 // 3. Generate Radio Episode
 app.post('/api/generate-episode', async (req, res) => {
   try {
