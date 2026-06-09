@@ -14,6 +14,14 @@ export default function EpisodeScript({ episode }: EpisodeScriptProps) {
   const [searchFilter, setSearchFilter] = useState('');
   const [roleFilter, setRoleFilter] = useState<string>('all');
 
+  // Real-time Web Audio API Visualizer state registries & refs
+  const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
+  const audioContextRef = React.useRef<AudioContext | null>(null);
+  const analyserRef = React.useRef<AnalyserNode | null>(null);
+  const animationFrameRef = React.useRef<number | null>(null);
+  const [visualizerTheme, setVisualizerTheme] = useState<'neon_amber' | 'cyber_scope' | 'liquid_mercury'>('neon_amber');
+  const [isVisualizerOpen, setIsVisualizerOpen] = useState(true);
+
   // Local editable copy of the movie/show script
   const [localScript, setLocalScript] = useState<ScriptLine[]>(() => script);
 
@@ -192,6 +200,7 @@ export default function EpisodeScript({ episode }: EpisodeScriptProps) {
       const audio = new Audio(audioSource);
       audio.playbackRate = speed;
       setPlayingAudio(audio);
+      connectVisualizer(audio);
 
       const cleanupAndStop = () => {
         setPlayingLineId(null);
@@ -214,6 +223,179 @@ export default function EpisodeScript({ episode }: EpisodeScriptProps) {
       setPlayingLineId(null);
       setAutoplayActive(false);
     }
+  };
+
+  // Connect active audio elements to the real-time Analyser node to support live visuals
+  const connectVisualizer = (audioElement: HTMLAudioElement) => {
+    try {
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        analyserRef.current = audioContextRef.current.createAnalyser();
+        analyserRef.current.fftSize = 256;
+        analyserRef.current.smoothingTimeConstant = 0.75;
+      }
+
+      const audioContext = audioContextRef.current;
+      const analyser = analyserRef.current!;
+
+      if (audioContext.state === 'suspended') {
+        audioContext.resume();
+      }
+
+      // Hook element. Note: browser restrictions allow one MediaElementAudioSourceNode per element.
+      // Since we instantiate a fresh Audio() object for every single vocal line, we can safely
+      // create a new node and connect it to our central analyzer!
+      const source = audioContext.createMediaElementSource(audioElement);
+      source.connect(analyser);
+      analyser.connect(audioContext.destination);
+
+      // Trigger standard canvas drawing loop
+      startWaveformAnimation();
+    } catch (err) {
+      console.warn('Web Audio node creator notice (falling back to dynamic standby wave):', err);
+      startWaveformAnimation();
+    }
+  };
+
+  // High fidelity canvas drawing loop (displays ambient radio wave when idle, and real audio frequency data on active plays)
+  const startWaveformAnimation = () => {
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+    }
+
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const analyser = analyserRef.current;
+    const bufferLength = analyser ? analyser.frequencyBinCount : 128;
+    const dataArray = new Uint8Array(bufferLength);
+    let waveOffset = 0;
+
+    const draw = () => {
+      animationFrameRef.current = requestAnimationFrame(draw);
+
+      const width = canvas.width;
+      const height = canvas.height;
+
+      // Deep dark futuristic background with phosphor persistence trail
+      ctx.fillStyle = 'rgba(10, 11, 14, 0.28)';
+      ctx.fillRect(0, 0, width, height);
+
+      // Check if audio has finished playing or is paused
+      const isActuallySpeechActive = analyser && playingLineId && playingAudio && !playingAudio.paused;
+
+      if (isActuallySpeechActive) {
+        analyser.getByteFrequencyData(dataArray);
+      } else {
+        // Beautiful flowing sine standby waves for radio offline mood
+        waveOffset += 0.035;
+        for (let i = 0; i < bufferLength; i++) {
+          const sineFactor = Math.sin(i * 0.12 + waveOffset) * Math.cos(i * 0.045 + waveOffset * 0.35);
+          dataArray[i] = Math.max(0, Math.min(255, 35 + Math.abs(sineFactor) * 55));
+        }
+      }
+
+      // Draw depending on Visualizer Theme Style
+      if (visualizerTheme === 'neon_amber') {
+        const barWidth = (width / bufferLength) * 1.6;
+        let x = 0;
+
+        for (let i = 0; i < bufferLength; i++) {
+          const percent = dataArray[i] / 255;
+          const barHeight = percent * height * 0.82;
+
+          const grad = ctx.createLinearGradient(0, height, 0, height - barHeight);
+          grad.addColorStop(0, 'rgba(255, 149, 0, 0.05)');
+          grad.addColorStop(0.5, 'rgba(255, 149, 0, 0.65)');
+          grad.addColorStop(1, '#ff9500');
+
+          ctx.fillStyle = grad;
+          ctx.fillRect(x, height - barHeight, barWidth - 1.5, barHeight);
+
+          if (barHeight > 5) {
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(x, Math.max(0, height - barHeight - 2), barWidth - 1.5, 2);
+          }
+
+          x += barWidth;
+        }
+
+        // Draw amber baseline
+        ctx.fillStyle = 'rgba(255, 149, 0, 0.1)';
+        ctx.fillRect(0, height - 1.5, width, 1.5);
+      } 
+      else if (visualizerTheme === 'cyber_scope') {
+        ctx.beginPath();
+        ctx.lineWidth = isActuallySpeechActive ? 3.0 : 1.5;
+        ctx.strokeStyle = '#00f2fe';
+        ctx.shadowColor = '#00f2fe';
+        ctx.shadowBlur = isActuallySpeechActive ? 12 : 3;
+
+        const sliceWidth = width / bufferLength;
+        let x = 0;
+
+        for (let i = 0; i < bufferLength; i++) {
+          const percent = dataArray[i] / 255;
+          const waveHeight = (percent - 0.15) * height * (isActuallySpeechActive ? 0.8 : 0.3);
+          const y = height / 2 + (i % 2 === 0 ? waveHeight : -waveHeight) * 0.45;
+
+          if (i === 0) {
+            ctx.moveTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
+          x += sliceWidth;
+        }
+
+        ctx.lineTo(width, height / 2);
+        ctx.stroke();
+        ctx.shadowBlur = 0; // reset shadow
+
+        // Grid lines in the background
+        ctx.strokeStyle = 'rgba(0, 242, 254, 0.03)';
+        ctx.lineWidth = 1;
+        for (let gl = 25; gl < width; gl += 25) {
+          ctx.beginPath();
+          ctx.moveTo(gl, 0);
+          ctx.lineTo(gl, height);
+          ctx.stroke();
+        }
+        ctx.beginPath();
+        ctx.moveTo(0, height / 2);
+        ctx.lineTo(width, height / 2);
+        ctx.stroke();
+      } 
+      else {
+        // dynamic symmetric violet mercury ripple centered inside canvas
+        const barWidth = (width / (bufferLength / 2)) * 0.95;
+        let x = 0;
+
+        for (let i = 0; i < bufferLength / 2; i++) {
+          const percent = dataArray[i] / 255;
+          const barHeight = percent * height * (isActuallySpeechActive ? 0.75 : 0.35);
+
+          const grad = ctx.createLinearGradient(0, height / 2 - barHeight / 2, 0, height / 2 + barHeight / 2);
+          grad.addColorStop(0, '#e100ff');
+          grad.addColorStop(1, '#7f00ff');
+
+          ctx.fillStyle = grad;
+          ctx.fillRect(width / 2 + x, height / 2 - barHeight / 2, barWidth - 1.5, barHeight);
+          ctx.fillRect(width / 2 - x - barWidth, height / 2 - barHeight / 2, barWidth - 1.5, barHeight);
+
+          x += barWidth;
+        }
+
+        // Draw symmetric glowing core
+        ctx.beginPath();
+        ctx.arc(width / 2, height / 2, 4.5, 0, 2 * Math.PI);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+      }
+    };
+
+    draw();
   };
 
   // Continuous Playback Engine Sequencers
@@ -293,14 +475,22 @@ export default function EpisodeScript({ episode }: EpisodeScriptProps) {
     }
   }, [autoplayActive, autoplayIndex]);
 
-  // Clean-up effect on component unmount
+  // Clean-up effect on component unmount and visualizer mount initializer
   useEffect(() => {
+    startWaveformAnimation();
     return () => {
       if (playingAudio) {
         playingAudio.pause();
       }
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      if (audioContextRef.current) {
+        audioContextRef.current.close().catch(() => {});
+        audioContextRef.current = null;
+      }
     };
-  }, [playingAudio]);
+  }, [visualizerTheme]);
 
   // Download Dialogue segment as a high-quality WAV audio file
   const handleDownloadLineClip = async (line: ScriptLine) => {
@@ -728,6 +918,69 @@ export default function EpisodeScript({ episode }: EpisodeScriptProps) {
         audioCache={audioCache}
         setAudioCache={setAudioCache}
       />
+
+      {/* REAL-TIME DYNAMIC WAVEFORM STUDIO MONITOR */}
+      {isVisualizerOpen && (
+        <div className="bg-[#121319] border border-white/5 rounded-2xl p-4 shadow-xl space-y-3 relative overflow-hidden">
+          {/* Subtle grid background mask */}
+          <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.012)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.012)_1px,transparent_1px)] bg-[size:16px_16px] pointer-events-none" />
+          
+          <div className="flex items-center justify-between relative z-10">
+            <div className="flex items-center gap-2">
+              <span className="flex h-2 w-2 relative shrink-0">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              <span className="text-[10px] uppercase font-black tracking-widest text-[#8e8e93] flex items-center gap-1.5 font-sans">
+                Live Studio Waveform & Signal Oscilloscope
+              </span>
+            </div>
+
+            {/* Visual themes slider selector */}
+            <div className="flex items-center gap-1.5 bg-black/45 p-1 rounded-xl border border-white/5">
+              {[
+                { id: 'neon_amber', label: 'Amber Bars' },
+                { id: 'cyber_scope', label: 'Cyan Matrix' },
+                { id: 'liquid_mercury', label: 'Vocal Ripple' }
+              ].map(themeOpt => (
+                <button
+                  key={themeOpt.id}
+                  onClick={() => setVisualizerTheme(themeOpt.id as any)}
+                  className={`text-[8.5px] uppercase font-black px-2.5 py-1 rounded-lg transition duration-150 cursor-pointer ${
+                    visualizerTheme === themeOpt.id
+                      ? 'bg-white/5 text-[#ff9500] shadow-sm font-extrabold border border-white/5'
+                      : 'text-slate-500 hover:text-slate-300'
+                  }`}
+                >
+                  {themeOpt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="h-24 bg-[#0a0b0e] border border-white/5 rounded-xl relative overflow-hidden flex items-center justify-center shadow-inner">
+            <canvas
+              ref={canvasRef}
+              width={750}
+              height={96}
+              className="w-full h-full block rounded-xl"
+            />
+            
+            {/* Overlay indicators on the corner of the oscilloscope */}
+            <div className="absolute top-2 left-3 font-mono text-[8px] text-slate-500 tracking-wider flex items-center gap-4 pointer-events-none select-none">
+              <span>SENSITIVITY: <span className="text-slate-400 font-bold">AUTO-TUNE</span></span>
+              <span>SAMPLING: <span className="text-slate-400 font-bold">24.0 kHz</span></span>
+              <span>MONITOR UNIT: <span className="text-[#ff9500] font-black animate-pulse">{playingLineId ? 'SPEECH ON-AIR-SIGNAL' : 'PASSIVE CARRIER STANDBY'}</span></span>
+            </div>
+
+            {/* Micro-labels right footer */}
+            <div className="absolute bottom-2 right-3 font-mono text-[7.5px] text-slate-600 pointer-events-none select-none flex items-center gap-1.5">
+              <span>DBFS LEVEL_METER</span>
+              <span className="w-1.5 h-1.5 rounded-full bg-[#ff3b30]" />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* CONTINUOUS BROADCAST PLAYER CONSOLE */}
       <div className="bg-black/35 border border-white/5 rounded-2xl p-4 flex flex-col md:flex-row items-center justify-between gap-4 shadow-2xl">

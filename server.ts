@@ -426,6 +426,47 @@ app.post('/api/generate-episode', async (req, res) => {
   }
 });
 
+// Helper to wrap raw 16-bit little-endian PCM inside a compatible standard 44-byte WAV header container
+function convertPcmToWav(pcmBuffer: Buffer, sampleRate: number = 24000): Buffer {
+  const numChannels = 1; // Mono
+  const bitsPerSample = 16;
+  const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+  const blockAlign = numChannels * (bitsPerSample / 8);
+  const subchunk2Size = pcmBuffer.length;
+  const chunkSize = 36 + subchunk2Size;
+
+  const header = Buffer.alloc(44);
+
+  // RIFF identifier
+  header.write('RIFF', 0);
+  // File size minus RIFF header
+  header.writeUInt32LE(chunkSize, 4);
+  // WAVE identifier
+  header.write('WAVE', 8);
+  // fmt subchunk identifier
+  header.write('fmt ', 12);
+  // Format subchunk size (16 for PCM)
+  header.writeUInt32LE(16, 16);
+  // Audio format: 1 (Linear PCM)
+  header.writeUInt16LE(1, 20);
+  // Number of channels: 1 (mono)
+  header.writeUInt16LE(numChannels, 22);
+  // Sample rate
+  header.writeUInt32LE(sampleRate, 24);
+  // Byte rate
+  header.writeUInt32LE(byteRate, 28);
+  // Block align
+  header.writeUInt16LE(blockAlign, 32);
+  // Bits per sample (16)
+  header.writeUInt16LE(bitsPerSample, 34);
+  // data subchunk identifier
+  header.write('data', 36);
+  // Subchunk size (data bytes size)
+  header.writeUInt32LE(subchunk2Size, 40);
+
+  return Buffer.concat([header, pcmBuffer]);
+}
+
 // 4. Transform specific text to vocal speech audio (TTS)
 app.post('/api/tts', async (req, res) => {
   try {
@@ -469,7 +510,31 @@ app.post('/api/tts', async (req, res) => {
     }
 
     console.log(`Successfully generated TTS. MimeType returned: ${mimeType || 'unknown'}`);
-    res.json({ audio: base64Audio, mimeType: mimeType || 'audio/wav' });
+    
+    let processedBase64 = base64Audio;
+    let processedMime = mimeType || 'audio/wav';
+
+    // If the output is raw PCM (which browsers can't natively play via direct Blob source),
+    // convert it to standard WAV by packing it with a proper 16-bit PCM WAV header container.
+    if (processedMime.includes('pcm')) {
+      try {
+        const pcmBuffer = Buffer.from(base64Audio, 'base64');
+        let sampleRate = 24000;
+        const match = processedMime.match(/rate=(\d+)/);
+        if (match) {
+          sampleRate = parseInt(match[1], 10);
+        }
+        
+        console.log(`[TTS Converter] Packaging raw PCM to WAV container at sampleRate: ${sampleRate}Hz`);
+        const wavBuffer = convertPcmToWav(pcmBuffer, sampleRate);
+        processedBase64 = wavBuffer.toString('base64');
+        processedMime = 'audio/wav';
+      } catch (err) {
+        console.error('[TTS Converter] Failed to convert PCM stream to WAV:', err);
+      }
+    }
+
+    res.json({ audio: processedBase64, mimeType: processedMime });
   } catch (error: any) {
     console.error('Gemini TTS generation error:', error);
     res.status(500).json({ error: error.message || 'Failed to generate voice speech audio' });
